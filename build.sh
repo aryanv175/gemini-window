@@ -39,7 +39,7 @@ echo "==> Compiling Swift"
 swiftc -O \
     "$ROOT/Sources/main.swift" \
     -o "$APP/Contents/MacOS/$APP_NAME" \
-    -framework Cocoa -framework WebKit -framework Carbon \
+    -framework Cocoa -framework Carbon -framework Speech -framework AVFoundation \
     -target arm64-apple-macos13.0
 
 echo "==> Ad-hoc code signing"

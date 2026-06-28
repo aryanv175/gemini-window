@@ -1,86 +1,18 @@
 import Cocoa
-import WebKit
 import Carbon.HIToolbox
 import Speech
 import AVFoundation
 
 // MARK: - Configuration
 // Global hotkey: ⌘⌥G -> show the pill and start listening immediately (Siri-style).
-private let geminiURL = URL(string: "https://gemini.google.com/app")!
 private let hotKeyKeyCode = UInt32(kVK_ANSI_G)
 private let hotKeyModifiers = UInt32(cmdKey | optionKey)
+private let geminiModel = "gemini-2.5-flash"
 
 private let pillWidth: CGFloat = 480
 private let pillHeight: CGFloat = 64
-private let maxPillHeight: CGFloat = 340     // grows vertically to show long transcripts
-private let loginHeight: CGFloat = 620        // only used for one-time Google sign-in
-private let silenceSeconds: TimeInterval = 1.3 // auto-finish after this much silence
-
-private let safariUserAgent =
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15"
-
-// Injected JS: clean Gemini's UI (only matters during the sign-in view).
-private let glassJS = """
-(function () {
-  function apply() {
-    document.documentElement.style.setProperty('filter', 'grayscale(1) contrast(1.05)', 'important');
-    var nodes = document.querySelectorAll('body *');
-    for (var i = 0; i < nodes.length; i++)
-      nodes[i].style.setProperty('box-shadow', 'none', 'important');
-  }
-  apply();
-  var p; new MutationObserver(function(){clearTimeout(p);p=setTimeout(apply,300);})
-    .observe(document.documentElement,{childList:true,subtree:true});
-})();
-"""
-
-// Injected JS: feed text into Gemini and post the streamed answer back to the app.
-private let askJS = """
-(function () {
-  function editor() { return document.querySelector('rich-textarea .ql-editor, .ql-editor, [contenteditable=true], textarea'); }
-  function send() {
-    return document.querySelector('button[aria-label*="Send" i], button[aria-label*="Submit" i], button.send-button');
-  }
-  window.__geminiAsk = function (text) {
-    var ed = editor();
-    if (!ed) { window.webkit.messageHandlers.gemini.postMessage({ type: 'error', text: 'no-input' }); return; }
-    ed.focus();
-    if (ed.tagName === 'TEXTAREA') {
-      ed.value = text; ed.dispatchEvent(new Event('input', { bubbles: true }));
-    } else {
-      ed.innerHTML = '<p></p>';
-      try { document.execCommand('insertText', false, text); }
-      catch (e) { ed.textContent = text; }
-      ed.dispatchEvent(new InputEvent('input', { bubbles: true }));
-    }
-    setTimeout(function () {
-      var s = send();
-      if (s && !s.disabled) s.click();
-      else ed.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
-      observe();
-    }, 250);
-  };
-  function observe() {
-    var last = '', stable, started = Date.now();
-    var obs = new MutationObserver(function () {
-      var r = document.querySelectorAll('message-content, .model-response-text, .markdown, [class*=response-content]');
-      if (!r.length) return;
-      var txt = (r[r.length - 1].innerText || '').trim();
-      if (txt && txt !== last) {
-        last = txt;
-        clearTimeout(stable);
-        stable = setTimeout(function () {
-          obs.disconnect();
-          window.webkit.messageHandlers.gemini.postMessage({ type: 'answer', text: last });
-        }, 1100);
-      }
-    });
-    obs.observe(document.body, { childList: true, subtree: true, characterData: true });
-    setTimeout(function () { try { obs.disconnect(); } catch (e) {}
-      window.webkit.messageHandlers.gemini.postMessage({ type: 'answer', text: last || '(no response)' }); }, 35000);
-  }
-})();
-"""
+private let maxPillHeight: CGFloat = 360
+private let silenceSeconds: TimeInterval = 1.3   // auto-finish after this much silence
 
 // MARK: - Helpers
 final class GeminiPanel: NSPanel {
@@ -94,28 +26,30 @@ final class ClickView: NSView {
 }
 
 // MARK: - App Delegate
-final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate,
-                         WKScriptMessageHandler, AVSpeechSynthesizerDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, AVSpeechSynthesizerDelegate {
     private var panel: GeminiPanel!
     private var container: NSView!
     private var header: ClickView!
-    private var webView: WKWebView!
     private var bodyLabel: NSTextField!
     private var logo: NSView!
     private var micBg: NSView!
     private var hotKeyRef: EventHotKeyRef?
     private var statusItem: NSStatusItem!
 
-    // Speech
+    // Speech in
     private let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
     private let audioEngine = AVAudioEngine()
     private var request: SFSpeechAudioBufferRecognitionRequest?
     private var task: SFSpeechRecognitionTask?
     private var silenceTimer: Timer?
-    private let synth = AVSpeechSynthesizer()
     private var listening = false
-    private var loginMode = false
-    private var webReady = false
+
+    // Speech out
+    private let synth = AVSpeechSynthesizer()
+
+    // Gemini API
+    private var apiTask: URLSessionDataTask?
+    private var history: [[String: Any]] = []   // multi-turn conversation context
 
     enum State { case idle, listening, thinking, answer }
     private var state: State = .idle
@@ -127,15 +61,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         buildMenuBarItem()
         registerHotKey()
         requestPermissions()
-        render("Talk to Gemini")
-        positionTopRight()
-        panel.orderFront(nil)
+        // Stay hidden & silent at rest; the menu-bar ✦ shows it's running. ⌘⌥G summons it.
     }
 
-    // MARK: Permissions
     private func requestPermissions() {
         SFSpeechRecognizer.requestAuthorization { _ in }
         AVCaptureDevice.requestAccess(for: .audio) { _ in }
+    }
+
+    // MARK: API key storage (~/Library/Application Support/GeminiWindow/api_key.txt)
+    private var keyFileURL: URL {
+        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("GeminiWindow", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("api_key.txt")
+    }
+    private var apiKey: String? {
+        let k = (try? String(contentsOf: keyFileURL, encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return (k?.isEmpty == false) ? k : nil
+    }
+    private func saveKey(_ key: String) {
+        try? key.trimmingCharacters(in: .whitespacesAndNewlines).write(to: keyFileURL, atomically: true, encoding: .utf8)
     }
 
     // MARK: Window / pill
@@ -167,15 +114,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         effect.autoresizingMask = [.width, .height]
         container.addSubview(effect)
 
-        // Hidden Gemini engine: lives full-size but clipped beneath the pill so WebKit
-        // keeps it active. Only revealed for one-time sign-in.
-        buildWebView()
-        // Parked fully below the visible pill (clipped out) so only the glass shows;
-        // moved on-screen only for one-time sign-in.
-        webView.frame = NSRect(x: 0, y: -loginHeight, width: pillWidth, height: loginHeight)
-        webView.autoresizingMask = [.width]
-        container.addSubview(webView)
-
         buildHeader()
         container.addSubview(header)
         panel.contentView = container
@@ -197,7 +135,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         bodyLabel.lineBreakMode = .byWordWrapping
         bodyLabel.maximumNumberOfLines = 0
         bodyLabel.cell?.wraps = true
-        bodyLabel.cell?.isScrollable = false
         header.addSubview(bodyLabel)
 
         let micSize: CGFloat = 40
@@ -241,28 +178,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         return v
     }
 
-    private func buildWebView() {
-        let config = WKWebViewConfiguration()
-        config.websiteDataStore = WKWebsiteDataStore.default()
-        config.defaultWebpagePreferences.allowsContentJavaScript = true
-        config.userContentController.add(self, name: "gemini")
-        config.userContentController.addUserScript(WKUserScript(
-            source: askJS, injectionTime: .atDocumentEnd, forMainFrameOnly: true))
-        webView = WKWebView(frame: .zero, configuration: config)
-        webView.customUserAgent = safariUserAgent
-        webView.navigationDelegate = self
-        webView.uiDelegate = self
-        webView.setValue(false, forKey: "drawsBackground")
-        webView.load(URLRequest(url: geminiURL))
-    }
-
     private func positionTopRight() {
         guard let screen = NSScreen.main else { return }
         let v = screen.visibleFrame
         panel.setFrameOrigin(NSPoint(x: v.maxX - panel.frame.width - 16, y: v.maxY - panel.frame.height - 16))
     }
 
-    // MARK: Rendering (pill grows vertically, never becomes the web tab)
+    // MARK: Rendering (grows vertically; never a big window)
     private func render(_ text: String) {
         bodyLabel.stringValue = text
         let leftPad: CGFloat = 52, rightPad: CGFloat = 64, topPad: CGFloat = 19
@@ -288,22 +210,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
 
     // MARK: Listening
     @objc private func micTapped() { toggleListening() }
-
-    private func toggleListening() {
-        if listening { finishAndSubmit() } else { startListening() }
-    }
+    private func toggleListening() { listening ? finishAndSubmit() : startListening() }
 
     private func startListening() {
-        guard !loginMode else { return }
         synth.stopSpeaking(at: .immediate)
         guard SFSpeechRecognizer.authorizationStatus() == .authorized,
               let recognizer = recognizer, recognizer.isAvailable else {
-            render("Allow Microphone + Speech Recognition in System Settings, then press ⌘⌥G")
+            render("Allow Microphone + Speech Recognition in System Settings, then ⌘⌥G")
             return
         }
-        stopAudio() // clean slate
-        state = .listening
-        listening = true
+        if apiKey == nil { render("Set your free API key:  ✦ menu → Set API Key…"); return }
+        stopAudio()
+        state = .listening; listening = true
         setMic(active: true)
         render("Listening…")
 
@@ -322,7 +240,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         do { try audioEngine.start() } catch {
             render("Mic error: \(error.localizedDescription)"); listening = false; setMic(active: false); return
         }
-
         task = recognizer.recognitionTask(with: req) { [weak self] result, error in
             guard let self = self else { return }
             if let result = result {
@@ -338,7 +255,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
 
     private func resetSilenceTimer(initial: Bool = false) {
         silenceTimer?.invalidate()
-        let delay = initial ? 6.0 : silenceSeconds // give 6s to start speaking, then 1.3s of silence
+        let delay = initial ? 6.0 : silenceSeconds
         silenceTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
             self?.finishAndSubmit()
         }
@@ -349,9 +266,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         listening = false
         silenceTimer?.invalidate()
         setMic(active: false)
-        let text = bodyLabel.stringValue
+        let query = bodyLabel.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         stopAudio()
-        let query = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if query.isEmpty || query == "Listening…" { state = .idle; render("Talk to Gemini"); return }
         state = .thinking
         render(query + "\n\n…")
@@ -361,36 +277,56 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     private func stopAudio() {
         if audioEngine.isRunning { audioEngine.stop() }
         audioEngine.inputNode.removeTap(onBus: 0)
-        request?.endAudio()
-        task?.cancel()
+        request?.endAudio(); task?.cancel()
         request = nil; task = nil
+        silenceTimer?.invalidate()
     }
 
     private func setMic(active: Bool) {
-        micBg.layer?.backgroundColor = active
-            ? NSColor.systemRed.cgColor
-            : NSColor.white.withAlphaComponent(0.92).cgColor
+        micBg.layer?.backgroundColor = active ? NSColor.systemRed.cgColor
+                                              : NSColor.white.withAlphaComponent(0.92).cgColor
     }
 
-    // MARK: Ask Gemini (hidden web session)
-    private func askGemini(_ text: String) {
-        let json = String(data: try! JSONSerialization.data(withJSONObject: [text]), encoding: .utf8)!
-        let arg = String(json.dropFirst().dropLast()) // JSON-escaped string literal
-        webView.evaluateJavaScript("window.__geminiAsk && window.__geminiAsk(\(arg))", completionHandler: nil)
-    }
+    // MARK: Gemini API
+    private func askGemini(_ query: String) {
+        guard let key = apiKey else { render("Set your free API key:  ✦ menu → Set API Key…"); return }
+        history.append(["role": "user", "parts": [["text": query]]])
+        let urlStr = "https://generativelanguage.googleapis.com/v1beta/models/\(geminiModel):generateContent?key=\(key)"
+        guard let url = URL(string: urlStr) else { return }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: ["contents": history])
 
-    // Response (or error) from the injected JS.
-    func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
-        guard let dict = message.body as? [String: Any] else { return }
-        let type = dict["type"] as? String ?? ""
-        let text = dict["text"] as? String ?? ""
-        if type == "error" {
-            render("Couldn't reach Gemini. Use the menu → \"Sign in to Google\" first.")
-            return
+        apiTask?.cancel()
+        apiTask = URLSession.shared.dataTask(with: req) { [weak self] data, resp, err in
+            guard let self = self else { return }
+            DispatchQueue.main.async {
+                guard self.panel.isVisible else { return } // silent if dismissed
+                if let err = err { self.render("Network error: \(err.localizedDescription)"); return }
+                guard let data = data else { self.render("No response from Gemini"); return }
+                if let http = resp as? HTTPURLResponse, http.statusCode != 200 {
+                    let body = String(data: data, encoding: .utf8) ?? ""
+                    self.render("Gemini API \(http.statusCode). Check your key.\n\(body.prefix(160))")
+                    return
+                }
+                guard let answer = self.parseAnswer(data) else { self.render("Couldn't read Gemini's reply."); return }
+                self.history.append(["role": "model", "parts": [["text": answer]]])
+                self.state = .answer
+                self.render(answer)
+                self.speak(answer)
+            }
         }
-        state = .answer
-        render(text)
-        speak(text)
+        apiTask?.resume()
+    }
+
+    private func parseAnswer(_ data: Data) -> String? {
+        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let candidates = obj["candidates"] as? [[String: Any]],
+              let content = candidates.first?["content"] as? [String: Any],
+              let parts = content["parts"] as? [[String: Any]] else { return nil }
+        let text = parts.compactMap { $0["text"] as? String }.joined()
+        return text.isEmpty ? nil : text
     }
 
     // MARK: TTS
@@ -403,39 +339,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     }
 
     func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
-        // Conversation mode: listen again for a follow-up once the answer is spoken.
+        // Conversation mode: listen for a follow-up, but only if still on screen.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-            guard let self = self, self.panel.isVisible, !self.loginMode else { return }
+            guard let self = self, self.panel.isVisible else { return }
             self.startListening()
         }
     }
 
-    // MARK: Sign-in (one-time): reveal the web view
-    @objc private func showLogin() {
-        loginMode = true
-        finishAndSubmitSilently()
-        let top = panel.frame.maxY
-        var f = panel.frame; f.size.height = loginHeight; f.origin.y = top - loginHeight
-        panel.setFrame(f, display: true)
-        webView.frame = NSRect(x: 0, y: 0, width: pillWidth, height: loginHeight)
-        webView.isHidden = false
-        header.isHidden = true
-        webView.reload()
-        webView.evaluateJavaScript(glassJS, completionHandler: nil)
-        NSApp.activate(ignoringOtherApps: true)
-        panel.makeKeyAndOrderFront(nil)
+    // MARK: Visibility / hotkey
+    func togglePanel() {
+        if panel.isVisible { hidePanel() } else { showAndListen() }
     }
 
-    @objc private func finishLogin() {
-        loginMode = false
-        header.isHidden = false
-        webView.frame = NSRect(x: 0, y: -loginHeight, width: pillWidth, height: loginHeight)
+    private func showAndListen() {
+        history.removeAll()                 // fresh conversation each summon
         render("Talk to Gemini")
         positionTopRight()
+        NSApp.activate(ignoringOtherApps: true)
+        panel.makeKeyAndOrderFront(nil)
+        startListening()
     }
 
-    private func finishAndSubmitSilently() {
-        listening = false; silenceTimer?.invalidate(); stopAudio(); setMic(active: false)
+    private func hidePanel() {
+        listening = false
+        stopAudio()
+        apiTask?.cancel(); apiTask = nil
+        synth.stopSpeaking(at: .immediate)
+        setMic(active: false)
+        state = .idle
+        panel.orderOut(nil)
     }
 
     // MARK: Menu bar
@@ -448,8 +380,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         let menu = NSMenu()
         menu.addItem(withTitle: "Talk  (⌘⌥G)", action: #selector(menuShow), keyEquivalent: "")
         menu.addItem(.separator())
-        menu.addItem(withTitle: "Sign in to Google…", action: #selector(showLogin), keyEquivalent: "")
-        menu.addItem(withTitle: "Done signing in", action: #selector(finishLogin), keyEquivalent: "")
+        menu.addItem(withTitle: "Set API Key…", action: #selector(promptForKey), keyEquivalent: "")
         menu.addItem(.separator())
         menu.addItem(withTitle: "Quit", action: #selector(menuQuit), keyEquivalent: "q")
         for i in menu.items { i.target = self }
@@ -459,47 +390,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     @objc private func menuShow() { showAndListen() }
     @objc private func menuQuit() { NSApp.terminate(nil) }
 
-    // MARK: Visibility / hotkey
-    func togglePanel() {
-        // ⌘⌥G: start listening immediately; press again to stop + dismiss.
-        if loginMode { return }
-        if listening || synth.isSpeaking { hidePanel() } else { showAndListen() }
-    }
-
-    private func showAndListen() {
-        guard !loginMode else { return }
-        render("Talk to Gemini")
-        positionTopRight()
+    @objc private func promptForKey() {
+        let alert = NSAlert()
+        alert.messageText = "Gemini API Key"
+        alert.informativeText = "Paste your free key from aistudio.google.com/apikey"
+        let tf = NSTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
+        tf.stringValue = apiKey ?? ""
+        alert.accessoryView = tf
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Cancel")
         NSApp.activate(ignoringOtherApps: true)
-        panel.makeKeyAndOrderFront(nil)
-        startListening()
-    }
-
-    private func hidePanel() {
-        finishAndSubmitSilently()
-        synth.stopSpeaking(at: .immediate)
-        state = .idle
-        panel.orderOut(nil)
-    }
-
-    // MARK: WebKit
-    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        webReady = true
-        if loginMode { webView.evaluateJavaScript(glassJS, completionHandler: nil) }
-    }
-
-    func webView(_ webView: WKWebView, requestMediaCapturePermissionFor origin: WKSecurityOrigin,
-                 initiatedByFrame frame: WKFrameInfo, type: WKMediaCaptureType,
-                 decisionHandler: @escaping (WKPermissionDecision) -> Void) {
-        decisionHandler(.grant)
-    }
-
-    func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
-                 for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
-        if let url = navigationAction.request.url, navigationAction.targetFrame == nil {
-            webView.load(URLRequest(url: url))
-        }
-        return nil
+        if alert.runModal() == .alertFirstButtonReturn { saveKey(tf.stringValue) }
     }
 
     // MARK: Global hotkey
