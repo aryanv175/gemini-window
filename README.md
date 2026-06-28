@@ -5,15 +5,18 @@ voice-first window** via a global hotkey — no Chrome tab, no API key. It's a r
 browser window, so you just **sign in with your Google account** (the one with Gemini Pro)
 and it stays signed in.
 
-It's designed as a fast, Siri-style voice assistant: a notification-sized translucent
-black-and-white panel that opens straight into Gemini's voice mode with a fresh chat.
+It's designed as a Siri replacement: a translucent **"Talk to Gemini" pill** (Gemini
+spark logo + mic button) that sits in the corner. Tap the mic — or the pill — and it
+expands into a small, frosted-glass, black-and-white voice panel running a fresh Gemini
+chat in voice mode. The whole Gemini web UI is hidden behind a clean native pill.
 
 ## Features
 
-- **Global hotkey** — ⌘⌥G toggles the window from anywhere (no Accessibility permission needed).
-- **Voice-first** — opens a fresh chat and auto-starts Gemini's microphone each time.
-- **Minimal UI** — model selector, side menu, attach button, text box, and greeting are
-  stripped away for a clean voice surface.
+- **Siri-style pill** — a compact "Talk to Gemini" bar; the cluttered web UI stays hidden
+  until you tap to talk, then it expands downward.
+- **Global hotkey** — ⌘⌥G toggles the pill from anywhere (no Accessibility permission needed).
+- **Voice-first** — tapping the mic opens a fresh chat and auto-starts Gemini's microphone.
+- **Minimal** — model selector, side menu, attach button, text box, and greeting are stripped.
 - **Liquid-glass look** — translucent, see-through, forced black & white.
 - **Background app** — no Dock icon, auto-starts at login, menu-bar ✦ icon for controls.
 
