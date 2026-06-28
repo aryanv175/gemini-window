@@ -1,0 +1,9 @@
+# Build output
+build/
+*.app
+
+# macOS
+.DS_Store
+
+# Local Claude Code config (machine-specific, may contain local paths)
+.claude/
