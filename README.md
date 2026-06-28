@@ -5,27 +5,36 @@ voice-first window** via a global hotkey — no Chrome tab, no API key. It's a r
 browser window, so you just **sign in with your Google account** (the one with Gemini Pro)
 and it stays signed in.
 
-It's designed as a Siri replacement: a translucent **"Talk to Gemini" pill** (Gemini
-spark logo + mic button) that sits in the corner. Tap the mic — or the pill — and it
-expands into a small, frosted-glass, black-and-white voice panel running a fresh Gemini
-chat in voice mode. The whole Gemini web UI is hidden behind a clean native pill.
+It's designed as a Siri replacement: a translucent **"Talk to Gemini" pill** in the
+corner. Press **⌘⌥G** and it's **instantly listening** — no buttons. You speak, it shows
+a **live transcript** in the pill, **auto-detects when you stop**, sends your words to
+Gemini, then **shows and speaks the answer** and listens again (conversation mode).
+
+## How it works
+
+- **Speech-to-text is native** — macOS on-device Speech recognition gives instant
+  listening, a live transcript, and silence-based auto-submit. No API key.
+- **The answer comes from Gemini** — your finalized text is fed into a hidden, logged-in
+  Gemini web session (your Google account), and the streamed reply is read back.
+- **Replies are spoken** with native text-to-speech.
 
 ## Features
 
-- **Siri-style pill** — a compact "Talk to Gemini" bar; the cluttered web UI stays hidden
-  until you tap to talk, then it expands downward.
-- **Global hotkey** — ⌘⌥G toggles the pill from anywhere (no Accessibility permission needed).
-- **Voice-first** — tapping the mic opens a fresh chat and auto-starts Gemini's microphone.
-- **Minimal** — model selector, side menu, attach button, text box, and greeting are stripped.
-- **Liquid-glass look** — translucent, see-through, forced black & white.
+- **Instant listening** — ⌘⌥G starts listening immediately; press again to stop/dismiss.
+- **No buttons** — automatic end-of-speech detection submits for you; no send button.
+- **Live transcript** — shown right in the pill, which grows vertically for long text but
+  never becomes a big browser window.
+- **Conversation mode** — after answering it listens again for a follow-up.
+- **Siri-style pill** — gradient Gemini spark logo + status, translucent glass, B&W.
 - **Background app** — no Dock icon, auto-starts at login, menu-bar ✦ icon for controls.
 
-## Usage
+## First-run setup (one time)
 
-- **Toggle the window:** press **⌘ + ⌥ + G** (Command + Option + G) anywhere, anytime.
-- **Menu bar:** click the ✦ sparkles icon → Open Gemini / Start Voice / Reload / Quit.
-- First launch shows the window so you can sign in. Login persists across restarts.
-- Each time you open the window it loads a **fresh chat** in voice mode.
+1. **Allow Microphone** and **Speech Recognition** when macOS prompts.
+2. From the menu-bar ✦ icon, choose **"Sign in to Google…"**, sign in to your Gemini
+   account in the panel, then choose **"Done signing in."** (Needed once so the hidden
+   session can answer; it persists afterward.)
+3. Press **⌘⌥G** and start talking.
 
 ## Build / install
 

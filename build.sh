@@ -30,6 +30,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>LSUIElement</key>             <true/>
     <key>NSHighResolutionCapable</key> <true/>
     <key>NSMicrophoneUsageDescription</key><string>Gemini uses your microphone for voice mode.</string>
+    <key>NSSpeechRecognitionUsageDescription</key><string>Used to transcribe what you say so Gemini can answer.</string>
 </dict>
 </plist>
 PLIST
